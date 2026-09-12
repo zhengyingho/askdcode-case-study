@@ -92,7 +92,7 @@ is translated afterwards.
 | **Front end** | Vanilla JavaScript, no framework. PWA manifest, installable on mobile |
 | **Application** | PHP 8 with PDO, no framework. Session-based auth plus Google OAuth |
 | **Database** | MySQL |
-| **Model** | DeepSeek streaming completions; a secondary Node service uses Google Gemini |
+| **Model** | DeepSeek streaming completions |
 | **Payments** | Razorpay / Curlec — one-off orders, recurring subscriptions, webhooks |
 | **Email** | PHPMailer over SMTP for verification and password reset |
 | **Node service** | Express with Helmet, rate limiting, request validation, Winston logging |
