@@ -1,0 +1,7 @@
+# This repository is documentation only - no application source, no config.
+*.php
+*.js
+*.log
+*.env
+keys*
+config*

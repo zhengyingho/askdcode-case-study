@@ -1,15 +1,15 @@
-# askdcode.com — engineering case study
+# askdcode — AI coaching platform
 
-An AI life-coaching platform I built and have run since April 2025 for DCODE Sdn Bhd,
-currently serving 20+ paying customers. Users complete an onboarding questionnaire and a
-birth-chart reading, then hold ongoing coaching conversations with a model that has their
-profile in context.
+A subscription AI coaching product built for DCODE Sdn Bhd, a Malaysian leadership training
+company. Users work through structured daily reflection and decision-making sessions with an
+AI coach that holds them to commitments they have made.
 
-I built the whole thing: backend, front end, database, deployment, and ongoing support. I also
-run it as sole proprietor — requirements, pricing, release cadence and customer support.
+I built and shipped the whole thing — backend, front end, payments, deployment and ongoing
+support — and run it as sole proprietor. It currently serves 20+ paying subscribers.
 
-**This repository is a write-up, not the source.** The code belongs to the client and isn't
-published. What follows is the architecture and the decisions behind it.
+> **This is a write-up, not a code repository.** The source belongs to the client and is not
+> published. Everything below describes decisions and architecture rather than reproducing the
+> implementation.
 
 ---
 
@@ -17,123 +17,107 @@ published. What follows is the architecture and the decisions behind it.
 
 ```mermaid
 flowchart TB
-    U[Browser<br/>EN / 中文]
-
-    subgraph public [Public surface — PHP]
-        AUTH[Session auth<br/>password_hash + Google OAuth]
-        APP[Onboarding · profile · chat history]
-        PROXY["/api/_proxy.php<br/>injects X-User-Email"]
+    subgraph client ["Browser (PWA)"]
+        UI["Chat UI<br/>vanilla JS, no framework"]
     end
 
-    subgraph private [Loopback only — 127.0.0.1:3000]
-        NODE[Express chat service]
-        BUDGET[Per-user daily spend cap]
-        PREFS[(SQLite<br/>preferences + analytics)]
+    subgraph app ["PHP application"]
+        CHAT["chat_api.php<br/>SSE streaming proxy"]
+        PROMPT["system_instructions.php<br/>prompt loader"]
+        METER["check_user_limit.php<br/>daily spend meter"]
+        AUTH["Sessions · Google OAuth<br/>email verification"]
+        PAY["Razorpay / Curlec<br/>orders · subscriptions · webhooks"]
     end
 
-    MYSQL[(MySQL<br/>users · chat logs · summaries)]
-    DS[DeepSeek<br/>birth-chart analysis]
-    GEM[Gemini 2.5 Pro<br/>coaching chat + search grounding]
+    subgraph data ["MySQL"]
+        DB[("users · conversations<br/>messages · subscription_plan<br/>habits · promises · tasks")]
+    end
 
-    U --> AUTH --> APP
-    APP --> MYSQL
-    APP --> DS
-    APP --> PROXY --> NODE
-    NODE --> BUDGET --> PREFS
-    NODE --> GEM
+    DOC["chatbot_prompts.md<br/>client-editable prompts"]
+    LLM["DeepSeek API<br/>streaming completions"]
+
+    UI -->|"POST message + history"| CHAT
+    CHAT --> PROMPT
+    PROMPT -.reads.-> DOC
+    CHAT -->|"stream: true"| LLM
+    LLM -->|"token deltas"| CHAT
+    CHAT -->|"text/event-stream"| UI
+    UI --> METER
+    METER --> DB
+    CHAT --> DB
+    AUTH --> DB
+    PAY --> DB
 ```
 
-Two tiers, deliberately. The PHP application owns the user, the session and the durable data.
-The Node service owns the conversation and the model calls. They talk over loopback only.
+## Decisions worth explaining
+
+**Token streaming through a PHP proxy.** The browser never talks to the model provider, so the
+API key stays server-side and every message can be metered and persisted. `chat_api.php` opens a
+streaming request to the provider and re-emits token deltas to the browser as Server-Sent Events,
+with output buffering and gzip explicitly disabled so chunks actually reach the client instead of
+sitting in a buffer until the response completes. Getting this right under shared hosting was
+most of the work — the default PHP configuration buffers aggressively, which silently turns a
+streaming endpoint into a slow non-streaming one.
+
+**Per-message cost accounting.** Every model response is written to the `messages` table with its
+own `api_cost`. A user's daily spend is the sum of that column over their conversations for the
+current day in Asia/Kuala_Lumpur, compared against the `api_money` allowance attached to their
+subscription plan. This means plan limits are denominated in actual inference cost rather than a
+proxy like message count, so a user having a long, expensive conversation is charged against the
+same budget as one having many short ones. It also means unit economics are queryable per user —
+I can see directly whether a subscriber is profitable.
+
+**Prompts live in a document, not in code.** The coaching methodology is the client's, not mine,
+and it changes. Rather than embedding prompts in PHP, they live in a Markdown file where each
+section is keyed by `## <coach> | <mode>` with the prompt in a fenced block. The loader parses
+that file into sections and caches it for the request. The client edits their own coaching
+prompts in a text file without touching code or needing a deploy, and the coach personas and
+conversation modes become a two-dimensional lookup instead of a branching conditional.
+
+**Subscription lifecycle handled through webhooks, not redirects.** Payment confirmation arrives
+on the `subscription.charged`, `subscription.cancelled`, `subscription.halted` and
+`payment.failed` webhooks rather than trusting the browser redirect after checkout, because users
+close the tab. Recurring renewals, refunds and restoring a lapsed subscription are all driven off
+the same event flow.
+
+**Bilingual by default.** The product is primarily Simplified Chinese with English as an option,
+and the language setting propagates into the prompt selection rather than only the interface —
+the coach responds in the user's language because the system prompt says so, not because output
+is translated afterwards.
+
+## Stack
 
 | | |
 |---|---|
-| **Front end** | PHP-rendered pages, vanilla JS, hand-written CSS; bilingual English / Chinese |
-| **Application** | PHP 8 with PDO, session auth, Google OAuth sign-in, PHPMailer for transactional mail |
-| **Chat service** | Node + Express — helmet, express-rate-limit, express-validator, winston |
-| **Data** | MySQL for users, chat logs, history and summaries; SQLite for preferences and usage analytics |
-| **Models** | DeepSeek `deepseek-chat` for the birth-chart reading; Gemini 2.5 Pro with Google Search grounding for coaching chat; Gemini 2.5 Flash on the lighter chat path |
+| **Front end** | Vanilla JavaScript, no framework. PWA manifest, installable on mobile |
+| **Application** | PHP 8 with PDO, no framework. Session-based auth plus Google OAuth |
+| **Database** | MySQL |
+| **Model** | DeepSeek streaming completions; a secondary Node service uses Google Gemini |
+| **Payments** | Razorpay / Curlec — one-off orders, recurring subscriptions, webhooks |
+| **Email** | PHPMailer over SMTP for verification and password reset |
+| **Node service** | Express with Helmet, rate limiting, request validation, Winston logging |
+
+## Features
+
+Multi-turn chat with persisted conversations, auto-generated titles and a history drawer ·
+several coach personas across two conversation modes · habit, promise, task and commitment
+tracking · structured reflection templates · onboarding questionnaire · free trial with
+server-side gating · subscription management and self-service cancellation · account recovery ·
+English and Simplified Chinese.
+
+## What I would do differently
+
+- **Conversation history grows unbounded.** The full transcript is sent on every turn, so cost
+  per message climbs as a conversation gets longer. Summarising older turns and sending a
+  rolling window would flatten that curve; this is the first thing I would change.
+- **No framework means no migrations.** Schema changes are manual. Fine at this size, a liability
+  if the data model keeps growing.
+- **The PHP application is one flat directory of endpoints.** It works and it is easy to deploy
+  on shared hosting, but there is no routing layer or shared middleware, so cross-cutting
+  concerns like auth checks are repeated per file rather than applied once.
+- **Coverage is manual.** There are no automated tests; correctness rests on the fact that I am
+  the only developer and use the product daily. That does not scale past one person.
 
 ---
 
-## Three decisions worth explaining
-
-### 1. Metering spend per user, because the unit economics are the product
-
-The failure mode for a subscription product wrapped around a paid model API is simple: one
-enthusiastic user talks to it all day and costs more than they pay. Rate limiting by request
-count doesn't fix it — a long conversation with a big context costs many times what a short one
-does, for the same single request.
-
-So the service meters **money, not requests**. Every model response carries its token counts;
-the service prices the call from them and writes it to an analytics table:
-
-```
-cost_myr = (output_tokens + thinking_tokens) × $10/M
-         + input_tokens                      × $1.25/M
-         all × 4.5 MYR/USD
-```
-
-Each user has a daily budget. Before generating, the service sums today's spend and refuses with
-`429` if the cap is hit, returning the exact reset time — computed as 24 hours from the moment
-the limit was first exceeded, read back out of the analytics log rather than reset at midnight,
-so someone who hits the cap at 11pm isn't unblocked an hour later.
-
-The same table doubles as the usage record: cost per user, per day, per conversation, queryable
-after the fact. Pricing decisions come from it.
-
-### 2. Capping conversation history, which halved the prompt bill
-
-Every turn of a chat is resent as context on the next one, so an unbounded history means cost
-grows quadratically over a conversation while adding little — coaching sessions rarely need
-what was said forty turns ago.
-
-The service keeps a sliding window of the last ten turns, dropping the oldest exchange each time
-the window overflows. Long sessions stay at a flat context cost instead of compounding, and
-**typical-session token spend fell by roughly half**. The user-facing quality difference was not
-noticeable, because the user's profile — the part that actually personalises the coaching — is
-injected through the system instruction on every call and is never subject to the window.
-
-That profile comes from the onboarding questionnaire: age group, occupation, living situation,
-relationship status, personality type, preferred coaching style, stress relievers and
-problem-solving method. It's assembled into the system prompt so the model is oriented to the
-user without spending conversation turns re-establishing it.
-
-### 3. Giving the chat service no public surface at all
-
-The Node service binds to `127.0.0.1` and is never exposed. Everything reaches it through a thin
-PHP proxy that checks the session first and forwards the authenticated user's identity in a
-header the client cannot set.
-
-This means there is exactly one authentication system, in the tier that already owns the user
-table, and the chat service can treat its caller as trusted. No token exchange between tiers, no
-second session store to keep consistent, no CORS surface. The cost is that the tiers can't scale
-independently — worth paying at this size, and the first thing I'd revisit if it grew.
-
-The service also runs helmet, request-size limits, per-IP rate limiting, and schema validation on
-every endpoint, with structured winston logging behind it.
-
----
-
-## What I'd do differently
-
-- **Responses aren't streamed.** The client waits on a complete generation, which on Gemini 2.5
-  Pro with thinking enabled is a long visible pause. Streaming is the single biggest perceived-
-  performance win available and it's the next thing I'd build.
-- **Secrets are read from the environment, which is right, but there's no rotation story.** Keys
-  live in the server environment and changing one is manual.
-- **The password reset flow mails a generated password** rather than a single-use expiring link.
-  It works, but a tokenised reset is the correct design and I'd replace it.
-- **Two databases is one too many.** MySQL for the app and SQLite for the chat service happened
-  because the tiers were built at different times. Preferences and analytics belong with
-  everything else.
-- **No automated tests.** The project has been maintained by one person who also runs the
-  business, and testing lost to shipping. It's the thing that would most reduce the risk of
-  changing it now.
-
----
-
-## Notes
-
-Built and maintained solo since April 2025. The platform is live and in paid use; source is
-client-owned and not published here. Happy to talk through any part of it in more detail.
+Built and maintained by [Zhengying Ho](https://github.com/zhengyingho) · Apr 2025 – present
