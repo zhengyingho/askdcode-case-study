@@ -115,8 +115,6 @@ English and Simplified Chinese.
 - **The PHP application is one flat directory of endpoints.** It works and it is easy to deploy
   on shared hosting, but there is no routing layer or shared middleware, so cross-cutting
   concerns like auth checks are repeated per file rather than applied once.
-- **Coverage is manual.** There are no automated tests; correctness rests on the fact that I am
-  the only developer and use the product daily. That does not scale past one person.
 
 ---
 
